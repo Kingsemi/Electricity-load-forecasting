@@ -57,8 +57,14 @@ if uploaded_file:
         st.stop()
 
     df["date"] = pd.to_datetime(df["date"])
-    df = df.set_index("date").asfreq("H")
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date")
 
+    # Remove duplicate timestamps
+    df = df.drop_duplicates(subset="date")
+
+    # Set index and enforce hourly
+    df = df.set_index("date").asfreq("H")
     # Time features
     df["hour"] = df.index.hour
     df["dayofweek"] = df.index.dayofweek
@@ -114,3 +120,4 @@ if uploaded_file:
         # -----------------------
         st.subheader("Forecasted Demand")
         st.dataframe(future_df)
+
