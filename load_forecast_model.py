@@ -19,10 +19,18 @@ def forecast_future(df, model, feature_cols, horizon=24, temp_future=None):
         if temp_future is not None:
             row["temperature"] = temp_future[i]
 
-        # Lag features safely
-        row["demand_lag_168hr"] = last["demand"].iloc[-168] if len(last["demand"]) >= 168 else last["demand"].mean()
-        row["demand_rolling_mean_24hr"] = last["demand"].iloc[-24:].mean()
-        row["demand_rolling_std_24hr"] = last["demand"].iloc[-24:].std()
+        # Safe lag features
+        if len(last["demand"]) >= 168:
+            row["demand_lag_168hr"] = last["demand"].iloc[-168]
+        else:
+            row["demand_lag_168hr"] = last["demand"].mean()
+
+        if len(last["demand"]) >= 24:
+            row["demand_rolling_mean_24hr"] = last["demand"].iloc[-24:].mean()
+            row["demand_rolling_std_24hr"] = last["demand"].iloc[-24:].std()
+        else:
+            row["demand_rolling_mean_24hr"] = last["demand"].mean()
+            row["demand_rolling_std_24hr"] = last["demand"].std()
 
         X = row[feature_cols]
         y_hat = model.predict(X)[0]
@@ -122,5 +130,6 @@ if uploaded_file:
         # -----------------------
         st.subheader("Forecasted Demand")
         st.dataframe(future_df)
+
 
 
