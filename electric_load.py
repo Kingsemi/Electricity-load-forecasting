@@ -1,38 +1,43 @@
-# ==============================
-# Streamlit Electrical Load Forecast App
-# Batch CSV • Auto Features • Forecast Plot • DateTime Picker
-# ==============================
+# ============================================
+# FULL STREAMLIT APP – ELECTRICAL LOAD FORECAST
+# Built directly from Electrical_load.ipynb
+# ============================================
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
 import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
+from datetime import datetime
 
-# -----------------------------
-# App Config
-# -----------------------------
-st.set_page_config(page_title="Electrical Load Forecast", layout="wide")
+# --------------------------------------------
+# PAGE CONFIG
+# --------------------------------------------
+st.set_page_config(
+    page_title="Electrical Load Forecast",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 st.title("⚡ Electrical Load Forecasting App")
-st.markdown("Single & batch predictions using a trained **XGBoost time-series model**")
+st.markdown("Prediction-only deployment of the **XGBoost time-series model** trained in the Jupyter notebook.")
 
-# -----------------------------
-# Load Model
-# -----------------------------
+# --------------------------------------------
+# LOAD TRAINED MODEL
+# --------------------------------------------
 @st.cache_resource
 def load_model():
     return joblib.load("xgb_tuned_load_forecast_model_.pkl")
 
 model = load_model()
-features = model.feature_names_in_
+model_features = model.feature_names_in_
 
-# -----------------------------
-# Helper: Feature Engineering
-# -----------------------------
-def build_features(df):
+# --------------------------------------------
+# FEATURE ENGINEERING (SAME AS NOTEBOOK)
+# --------------------------------------------
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+
     df['hour'] = df.index.hour
     df['month'] = df.index.month
     df['weekofyear'] = df.index.isocalendar().week.astype(int)
@@ -46,73 +51,100 @@ def build_features(df):
 
     return df.dropna()
 
-# -----------------------------
-# Sidebar Mode Selection
-# -----------------------------
-mode = st.sidebar.radio("Select Mode", ["Single Prediction", "Batch CSV Prediction"])
+# --------------------------------------------
+# SIDEBAR MODE SELECTION
+# --------------------------------------------
+st.sidebar.header("Mode Selection")
+mode = st.sidebar.radio(
+    "Choose prediction type",
+    ["Single Forecast", "Batch CSV Forecast"]
+)
 
-# =====================================================
-# SINGLE PREDICTION MODE
-# =====================================================
-if mode == "Single Prediction":
-    st.subheader("🔮 Single Forecast")
+# ============================================
+# SINGLE FORECAST MODE
+# ============================================
+if mode == "Single Forecast":
+    st.subheader("🔮 Single-Time Forecast")
 
-    forecast_time = st.date_input("Select Date", datetime.now().date())
-    forecast_hour = st.slider("Hour", 0, 23, datetime.now().hour)
+    st.markdown("Upload **recent historical demand data** (minimum 168 hours).")
 
-    st.markdown("### Recent Load Data (last 7 days)")
-    recent_csv = st.file_uploader("Upload recent demand CSV (must include datetime, demand)", type="csv")
+    uploaded_file = st.file_uploader(
+        "Upload CSV (columns: datetime, demand)",
+        type="csv"
+    )
 
-    if recent_csv:
-        recent_df = pd.read_csv(recent_csv, parse_dates=['datetime'])
-        recent_df = recent_df.set_index('datetime')
-
-        engineered = build_features(recent_df)
-        X_latest = engineered[features].iloc[-1:]
-
-        if st.button("Predict"):
-            pred = model.predict(X_latest)[0]
-            st.success(f"Predicted Load: **{pred:.2f} MW**")
-
-# =====================================================
-# BATCH CSV MODE
-# =====================================================
-if mode == "Batch CSV Prediction":
-    st.subheader("📂 Batch CSV Forecast")
-
-    csv_file = st.file_uploader("Upload CSV with datetime & demand columns", type="csv")
-
-    if csv_file:
-        df = pd.read_csv(csv_file, parse_dates=['datetime'])
+    if uploaded_file is not None:
+        df = pd.read_csv(uploaded_file, parse_dates=['datetime'])
         df = df.set_index('datetime')
+        df = df.sort_index()
 
-        engineered = build_features(df)
-        X = engineered[features]
-        engineered['prediction'] = model.predict(X)
+        if len(df) < 168:
+            st.error("At least 168 hours of data is required for lag features.")
+        else:
+            features_df = engineer_features(df)
+            X_latest = features_df[model_features].iloc[-1:]
 
-        st.success("Batch prediction completed")
-        st.dataframe(engineered[['demand', 'prediction']].tail(100))
+            forecast_date = st.date_input("Forecast Date", X_latest.index[0].date())
+            forecast_hour = st.slider("Forecast Hour", 0, 23, X_latest.index[0].hour)
 
-        # -----------------------------
-        # Forecast Plot
-        # -----------------------------
-        st.subheader("📈 Forecast Plot")
-        fig, ax = plt.subplots()
-        ax.plot(engineered.index, engineered['demand'], label='Actual')
-        ax.plot(engineered.index, engineered['prediction'], label='Predicted')
-        ax.legend()
-        st.pyplot(fig)
+            if st.button("Predict Load"):
+                prediction = model.predict(X_latest)[0]
+                st.success(f"Predicted Electrical Load: **{prediction:.2f} MW**")
 
-        # Download
-        st.download_button(
-            "Download Predictions",
-            engineered.to_csv().encode('utf-8'),
-            "load_predictions.csv",
-            "text/csv"
-        )
+                st.markdown("### Recent Load Trend")
+                fig, ax = plt.subplots()
+                ax.plot(df.tail(200).index, df.tail(200)['demand'], label='Actual Load')
+                ax.legend()
+                st.pyplot(fig)
 
-# -----------------------------
-# Footer
-# -----------------------------
+# ============================================
+# BATCH CSV FORECAST MODE
+# ============================================
+if mode == "Batch CSV Forecast":
+    st.subheader("📂 Batch Load Forecast")
+
+    st.markdown("Upload a CSV file containing continuous historical demand data.")
+
+    uploaded_file = st.file_uploader(
+        "Upload CSV (columns: datetime, demand)",
+        type="csv",
+        key="batch"
+    )
+
+    if uploaded_file is not None:
+        df = pd.read_csv(uploaded_file, parse_dates=['datetime'])
+        df = df.set_index('datetime')
+        df = df.sort_index()
+
+        if len(df) < 168:
+            st.error("At least 168 hours of data is required for batch forecasting.")
+        else:
+            features_df = engineer_features(df)
+            X = features_df[model_features]
+
+            features_df['prediction'] = model.predict(X)
+
+            st.success("Batch prediction completed successfully")
+
+            st.markdown("### Forecast Results")
+            st.dataframe(features_df[['demand', 'prediction']].tail(100))
+
+            st.markdown("### Actual vs Predicted Load")
+            fig, ax = plt.subplots()
+            ax.plot(features_df.index, features_df['demand'], label='Actual')
+            ax.plot(features_df.index, features_df['prediction'], label='Predicted')
+            ax.legend()
+            st.pyplot(fig)
+
+            st.download_button(
+                label="Download Predictions as CSV",
+                data=features_df.to_csv().encode('utf-8'),
+                file_name="load_forecast_predictions.csv",
+                mime="text/csv"
+            )
+
+# --------------------------------------------
+# FOOTER
+# --------------------------------------------
 st.markdown("---")
-st.caption("Streamlit • XGBoost • Time-Series Load Forecasting")
+st.caption("Electrical Load Forecasting • XGBoost • Streamlit Deployment")
