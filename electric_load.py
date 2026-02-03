@@ -136,7 +136,7 @@ def forecast_with_ci(model, history, horizon=24, n_samples=30):
 # UI
 # =========================================================
 
-st.title("⚡ Electrical Load Forecasting (XGBoost – Production)")
+st.title("⚡ Electrical Load Forecasting (Production App)")
 
 st.sidebar.header("Settings")
 
@@ -163,6 +163,9 @@ if uploaded_file:
 
     df_feat = create_features(df).dropna()
 
+    st.subheader("Recent Load")
+    st.line_chart(df_feat["demand"].tail(168))
+
     # ---------------- AUTO RETRAIN ----------------
     if enable_retrain:
         st.info("Retraining model...")
@@ -181,6 +184,38 @@ if uploaded_file:
     mape = mean_absolute_percentage_error(y_test, preds)*100
     st.metric("MAPE (%)", f"{mape:.2f}")
 
+    # ---------------- SINGLE STEP PREDICTION ----------------
+    st.subheader("🔮 Predict Load for One Hour")
+
+    predict_time = st.datetime_input(
+        "Select Date & Time",
+        value=df_feat.index[-1] + pd.Timedelta(hours=1)
+    )
+
+    if st.button("Predict Single Load"):
+
+        lag_24 = df_feat["demand"].iloc[-24]
+        lag_168 = df_feat["demand"].iloc[-168]
+
+        roll_mean_24 = df_feat["demand"].iloc[-24:].mean()
+        roll_std_24 = df_feat["demand"].iloc[-24:].std()
+
+        row = pd.DataFrame([{
+            "hour": predict_time.hour,
+            "month": predict_time.month,
+            "weekofyear": int(predict_time.isocalendar().week),
+            "quarter": predict_time.quarter,
+            "is_weekend": int(predict_time.weekday() >= 5),
+            "demand_lag_24hr": lag_24,
+            "demand_lag_168hr": lag_168,
+            "demand_rolling_mean_24hr": roll_mean_24,
+            "demand_rolling_std_24hr": roll_std_24
+        }])
+
+        pred_load = model.predict(row)[0]
+
+        st.success(f"Predicted Load: {pred_load:.2f}")
+
     # ---------------- FEATURE IMPORTANCE ----------------
     st.subheader("Feature Importance")
 
@@ -196,7 +231,6 @@ if uploaded_file:
     st.subheader("Permutation Importance")
 
     perm = permutation_importance(model, X_test, y_test, n_repeats=5, random_state=42)
-
     perm_imp = pd.Series(perm.importances_mean, index=FEATURE_COLS).sort_values()
 
     fig_perm, ax_perm = plt.subplots()
