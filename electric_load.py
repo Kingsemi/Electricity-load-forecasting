@@ -4,9 +4,8 @@ import numpy as np
 import joblib
 import matplotlib.pyplot as plt
 from collections import deque
-import shap
 from sklearn.metrics import mean_absolute_percentage_error
-from xgboost import XGBRegressor
+from sklearn.inspection import permutation_importance
 
 # =========================================================
 # CONFIG
@@ -33,7 +32,7 @@ def load_model():
 model = load_model()
 
 # =========================================================
-# FEATURE ENGINEERING (ORIGINAL STYLE)
+# FEATURE ENGINEERING
 # =========================================================
 
 def create_features(data):
@@ -111,8 +110,9 @@ def forecast_with_ci(model, history, horizon=24, n_samples=30):
     sims = []
 
     for _ in range(n_samples):
-        noise = np.random.normal(0, history["demand"].std()*0.05, size=len(history))
+
         noisy = history.copy()
+        noise = np.random.normal(0, history["demand"].std()*0.05, size=len(history))
         noisy["demand"] = noisy["demand"] + noise
 
         f = forecast_future_xgb_fast(model, noisy, horizon)
@@ -136,12 +136,12 @@ def forecast_with_ci(model, history, horizon=24, n_samples=30):
 # UI
 # =========================================================
 
-st.title("⚡ Electrical Load Forecasting (XGBoost – Advanced)")
+st.title("⚡ Electrical Load Forecasting (XGBoost – Production)")
 
 st.sidebar.header("Settings")
 
 horizon = st.sidebar.slider("Forecast Horizon (hours)", 24, 168, 24)
-enable_retrain = st.sidebar.checkbox("Auto-retrain model on uploaded data")
+enable_retrain = st.sidebar.checkbox("Auto-retrain on uploaded data")
 
 uploaded_file = st.file_uploader("Upload CSV (must contain 'date' and 'demand')", type=["csv"])
 
@@ -163,30 +163,52 @@ if uploaded_file:
 
     df_feat = create_features(df).dropna()
 
-    # ------------------ AUTO RETRAIN ------------------
+    # ---------------- AUTO RETRAIN ----------------
     if enable_retrain:
-        st.info("Retraining model on uploaded data...")
+        st.info("Retraining model...")
         X = df_feat[FEATURE_COLS]
         y = df_feat["demand"]
         model.fit(X, y)
         joblib.dump(model, MODEL_PATH)
         st.success("Model retrained and saved.")
 
-    # ------------------ MAPE ------------------
+    # ---------------- MAPE ----------------
     holdout = int(len(df_feat)*0.8)
     X_test = df_feat[FEATURE_COLS].iloc[holdout:]
     y_test = df_feat["demand"].iloc[holdout:]
     preds = model.predict(X_test)
 
-    mape = mean_absolute_percentage_error(y_test, preds) * 100
-    st.metric("MAPE (%) on holdout", f"{mape:.2f}")
+    mape = mean_absolute_percentage_error(y_test, preds)*100
+    st.metric("MAPE (%)", f"{mape:.2f}")
 
-    # ------------------ FORECAST + CI ------------------
+    # ---------------- FEATURE IMPORTANCE ----------------
+    st.subheader("Feature Importance")
+
+    xgb = model.named_steps["model"]
+
+    fi = pd.Series(xgb.feature_importances_, index=FEATURE_COLS).sort_values()
+
+    fig_imp, ax_imp = plt.subplots()
+    fi.plot(kind="barh", ax=ax_imp)
+    st.pyplot(fig_imp)
+
+    # ---------------- PERMUTATION IMPORTANCE ----------------
+    st.subheader("Permutation Importance")
+
+    perm = permutation_importance(model, X_test, y_test, n_repeats=5, random_state=42)
+
+    perm_imp = pd.Series(perm.importances_mean, index=FEATURE_COLS).sort_values()
+
+    fig_perm, ax_perm = plt.subplots()
+    perm_imp.plot(kind="barh", ax=ax_perm)
+    st.pyplot(fig_perm)
+
+    # ---------------- FORECAST ----------------
     if st.button("Run Forecast"):
 
         ci = forecast_with_ci(model, df_feat, horizon)
 
-        st.subheader("Forecast with Confidence Bands")
+        st.subheader("Forecast with Confidence Intervals")
         st.dataframe(ci)
 
         combined = pd.concat([df_feat[["demand"]].tail(168), ci["P50"]])
@@ -196,18 +218,6 @@ if uploaded_file:
         ax.fill_between(ci.index, ci["P10"], ci["P90"], alpha=0.3)
         ax.axvline(df_feat.index[-1], linestyle="--")
         st.pyplot(fig)
-
-        # ------------------ SHAP ------------------
-        st.subheader("SHAP Feature Importance")
-
-        explainer = shap.TreeExplainer(model.named_steps["model"])
-        sample = df_feat[FEATURE_COLS].tail(200)
-
-        shap_values = explainer.shap_values(sample)
-
-        fig2 = plt.figure()
-        shap.summary_plot(shap_values, sample, show=False)
-        st.pyplot(fig2)
 
 else:
     st.info("Upload CSV to begin.")
