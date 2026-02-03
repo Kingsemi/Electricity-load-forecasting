@@ -1,203 +1,213 @@
-# ============================================
-# FULL STREAMLIT APP – ELECTRICAL LOAD FORECAST
-# Robust and Production-Ready
-# ============================================
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
 import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
+from collections import deque
+import shap
+from sklearn.metrics import mean_absolute_percentage_error
+from xgboost import XGBRegressor
 
-# --------------------------------------------
-# PAGE CONFIG
-# --------------------------------------------
-st.set_page_config(
-    page_title="Electrical Load Forecast",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# =========================================================
+# CONFIG
+# =========================================================
 
-st.title("⚡ Electrical Load Forecasting App")
-st.markdown("Prediction-only deployment of the **XGBoost time-series model** trained in the Jupyter notebook.")
+st.set_page_config(page_title="Electrical Load Forecasting", layout="wide")
 
-# --------------------------------------------
-# LOAD TRAINED MODEL
-# --------------------------------------------
+MODEL_PATH = "xgb_tuned_load_forecast_model_.pkl"
+
+FEATURE_COLS = [
+    "hour","month","weekofyear","quarter","is_weekend",
+    "demand_lag_24hr","demand_lag_168hr",
+    "demand_rolling_mean_24hr","demand_rolling_std_24hr"
+]
+
+# =========================================================
+# LOAD MODEL
+# =========================================================
+
 @st.cache_resource
 def load_model():
-    return joblib.load("xgb_tuned_load_forecast_model_.pkl")
+    return joblib.load(MODEL_PATH)
 
 model = load_model()
-model_features = model.feature_names_in_
 
-# --------------------------------------------
-# FEATURE ENGINEERING
-# --------------------------------------------
-def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
+# =========================================================
+# FEATURE ENGINEERING (ORIGINAL STYLE)
+# =========================================================
 
-    df['hour'] = df.index.hour
-    df['month'] = df.index.month
-    df['weekofyear'] = df.index.isocalendar().week.astype(int)
-    df['quarter'] = df.index.quarter
-    df['is_weekend'] = (df.index.weekday >= 5).astype(int)
+def create_features(data):
 
-    df['demand_lag_24hr'] = df['demand'].shift(24)
-    df['demand_lag_168hr'] = df['demand'].shift(168)
-    df['demand_rolling_mean_24hr'] = df['demand'].rolling(24).mean()
-    df['demand_rolling_std_24hr'] = df['demand'].rolling(24).std()
+    df = data.copy()
 
-    return df.dropna()
+    df["hour"] = df.index.hour
+    df["month"] = df.index.month
+    df["weekofyear"] = df.index.isocalendar().week.astype(int)
+    df["quarter"] = df.index.quarter
+    df["is_weekend"] = (df.index.dayofweek >= 5).astype(int)
 
-# --------------------------------------------
-# CSV LOADING & PREPROCESSING
-# --------------------------------------------
-def load_and_process_csv(uploaded_file):
-    try:
-        # Load CSV
-        df = pd.read_csv(uploaded_file)
-        df.columns = [c.strip().lower() for c in df.columns]
+    df["demand_lag_24hr"] = df["demand"].shift(24)
+    df["demand_lag_168hr"] = df["demand"].shift(168)
 
-        # Detect datetime column
-        datetime_col = None
-        for col in df.columns:
-            if 'date' in col or 'time' in col:
-                datetime_col = col
-                break
-        if datetime_col is None:
-            st.error("No datetime-like column found. Please ensure your CSV has a date/time column.")
-            return None
+    df["demand_rolling_mean_24hr"] = df["demand"].shift(1).rolling(24).mean()
+    df["demand_rolling_std_24hr"] = df["demand"].shift(1).rolling(24).std()
 
-        # Convert to datetime and set index
-        df[datetime_col] = pd.to_datetime(df[datetime_col], errors='coerce')
-        df = df.dropna(subset=[datetime_col])
-        df = df.set_index(datetime_col).sort_index()
+    return df
 
-        # Check for demand column
-        if 'demand' not in df.columns:
-            st.error("CSV must contain a column named 'demand'.")
-            return None
+# =========================================================
+# FAST RECURSIVE FORECAST (O(N))
+# =========================================================
 
-        # Interpolate missing demand
-        df['demand'] = df['demand'].interpolate(method='linear')
+def forecast_future_xgb_fast(model, history, horizon=24):
 
-        return df
+    hist = history.copy()
 
-    except Exception as e:
-        st.error(f"Error reading CSV: {e}")
-        return None
+    lag_24 = deque(hist["demand"].iloc[-24:], maxlen=24)
+    lag_168 = deque(hist["demand"].iloc[-168:], maxlen=168)
+    roll_24 = deque(hist["demand"].iloc[-24:], maxlen=24)
 
-# --------------------------------------------
-# SIDEBAR MODE SELECTION
-# --------------------------------------------
-st.sidebar.header("Mode Selection")
-mode = st.sidebar.radio(
-    "Choose prediction type",
-    ["Single Forecast", "Batch CSV Forecast"]
-)
+    preds = []
+    last_time = hist.index[-1]
 
-# ============================================
-# SINGLE FORECAST MODE
-# ============================================
-if mode == "Single Forecast":
-    st.subheader("🔮 Single-Time Forecast")
-    st.markdown("Upload **recent historical demand data** (minimum 168 hours).")
+    for _ in range(horizon):
 
-    uploaded_file = st.file_uploader(
-        "Upload CSV (columns: datetime, demand)",
-        type="csv"
+        next_time = last_time + pd.Timedelta(hours=1)
+
+        row = pd.DataFrame([{
+            "hour": next_time.hour,
+            "month": next_time.month,
+            "weekofyear": int(next_time.isocalendar().week),
+            "quarter": next_time.quarter,
+            "is_weekend": int(next_time.dayofweek >= 5),
+            "demand_lag_24hr": lag_24[0],
+            "demand_lag_168hr": lag_168[0],
+            "demand_rolling_mean_24hr": np.mean(roll_24),
+            "demand_rolling_std_24hr": np.std(roll_24)
+        }])
+
+        y_pred = model.predict(row)[0]
+        preds.append(y_pred)
+
+        lag_24.append(y_pred)
+        lag_168.append(y_pred)
+        roll_24.append(y_pred)
+
+        last_time = next_time
+
+    idx = pd.date_range(
+        start=history.index[-1] + pd.Timedelta(hours=1),
+        periods=horizon,
+        freq="H"
     )
 
-    if uploaded_file is not None:
-        df = load_and_process_csv(uploaded_file)
-        if df is not None:
-            if len(df) < 168:
-                st.error("At least 168 hours of data is required for lag features.")
-            else:
-                features_df = engineer_features(df)
-                X_latest = features_df[model_features].iloc[-1:]
+    return pd.DataFrame({"demand": preds}, index=idx)
 
-                # Forecast date & hour input
-                forecast_date = st.date_input("Forecast Date", X_latest.index[-1].date())
-                forecast_hour = st.slider("Forecast Hour", 0, 23, X_latest.index[-1].hour)
-                forecast_dt = pd.Timestamp.combine(forecast_date, datetime.min.time()) + pd.Timedelta(hours=forecast_hour)
-                X_latest.index = [forecast_dt]
+# =========================================================
+# CONFIDENCE INTERVALS (BOOTSTRAP)
+# =========================================================
 
-                if st.button("Predict Load"):
-                    try:
-                        prediction = model.predict(X_latest)[0]
-                        st.success(f"Predicted Electrical Load: **{prediction:.2f} MW**")
+def forecast_with_ci(model, history, horizon=24, n_samples=30):
 
-                        # Recent load trend
-                        st.markdown("### Recent Load Trend")
-                        fig, ax = plt.subplots()
-                        ax.plot(df.tail(200).index, df.tail(200)['demand'], label='Actual Load')
-                        ax.set_xlabel("Datetime")
-                        ax.set_ylabel("Load (MW)")
-                        ax.legend()
-                        fig.autofmt_xdate()
-                        st.pyplot(fig)
+    sims = []
 
-                    except Exception as e:
-                        st.error(f"Prediction failed: {e}")
+    for _ in range(n_samples):
+        noise = np.random.normal(0, history["demand"].std()*0.05, size=len(history))
+        noisy = history.copy()
+        noisy["demand"] = noisy["demand"] + noise
 
-# ============================================
-# BATCH CSV FORECAST MODE
-# ============================================
-if mode == "Batch CSV Forecast":
-    st.subheader("📂 Batch Load Forecast")
-    st.markdown("Upload a CSV file containing continuous historical demand data.")
+        f = forecast_future_xgb_fast(model, noisy, horizon)
+        sims.append(f["demand"].values)
 
-    uploaded_file = st.file_uploader(
-        "Upload CSV (columns: datetime, demand)",
-        type="csv",
-        key="batch"
+    sims = np.array(sims)
+
+    p10 = np.percentile(sims, 10, axis=0)
+    p50 = np.percentile(sims, 50, axis=0)
+    p90 = np.percentile(sims, 90, axis=0)
+
+    idx = pd.date_range(
+        start=history.index[-1] + pd.Timedelta(hours=1),
+        periods=horizon,
+        freq="H"
     )
 
-    if uploaded_file is not None:
-        df = load_and_process_csv(uploaded_file)
-        if df is not None:
-            if len(df) < 168:
-                st.error("At least 168 hours of data is required for batch forecasting.")
-            else:
-                features_df = engineer_features(df)
-                X = features_df[model_features]
+    return pd.DataFrame({"P10": p10, "P50": p50, "P90": p90}, index=idx)
 
-                try:
-                    features_df['prediction'] = model.predict(X)
-                    st.success("Batch prediction completed successfully")
+# =========================================================
+# UI
+# =========================================================
 
-                    # Forecast results table
-                    st.markdown("### Forecast Results")
-                    st.dataframe(features_df[['demand', 'prediction']].tail(100))
+st.title("⚡ Electrical Load Forecasting (XGBoost – Advanced)")
 
-                    # Actual vs predicted plot
-                    st.markdown("### Actual vs Predicted Load")
-                    fig, ax = plt.subplots()
-                    ax.plot(features_df.index, features_df['demand'], label='Actual')
-                    ax.plot(features_df.index, features_df['prediction'], label='Predicted')
-                    ax.set_xlabel("Datetime")
-                    ax.set_ylabel("Load (MW)")
-                    ax.legend()
-                    fig.autofmt_xdate()
-                    st.pyplot(fig)
+st.sidebar.header("Settings")
 
-                    # Download button
-                    st.download_button(
-                        label="Download Predictions as CSV",
-                        data=features_df.to_csv().encode('utf-8'),
-                        file_name="load_forecast_predictions.csv",
-                        mime="text/csv"
-                    )
+horizon = st.sidebar.slider("Forecast Horizon (hours)", 24, 168, 24)
+enable_retrain = st.sidebar.checkbox("Auto-retrain model on uploaded data")
 
-                except Exception as e:
-                    st.error(f"Batch prediction failed: {e}")
+uploaded_file = st.file_uploader("Upload CSV (must contain 'date' and 'demand')", type=["csv"])
 
-# --------------------------------------------
-# FOOTER
-# --------------------------------------------
-st.markdown("---")
-st.caption("Electrical Load Forecasting • XGBoost • Streamlit Deployment")
+# =========================================================
+# MAIN
+# =========================================================
 
+if uploaded_file:
+
+    df = pd.read_csv(uploaded_file)
+
+    if not {"date","demand"}.issubset(df.columns):
+        st.error("CSV must contain 'date' and 'demand'")
+        st.stop()
+
+    df["LoadDate"] = pd.to_datetime(df["date"])
+    df = df.set_index("LoadDate")
+    df = df.sort_index()
+
+    df_feat = create_features(df).dropna()
+
+    # ------------------ AUTO RETRAIN ------------------
+    if enable_retrain:
+        st.info("Retraining model on uploaded data...")
+        X = df_feat[FEATURE_COLS]
+        y = df_feat["demand"]
+        model.fit(X, y)
+        joblib.dump(model, MODEL_PATH)
+        st.success("Model retrained and saved.")
+
+    # ------------------ MAPE ------------------
+    holdout = int(len(df_feat)*0.8)
+    X_test = df_feat[FEATURE_COLS].iloc[holdout:]
+    y_test = df_feat["demand"].iloc[holdout:]
+    preds = model.predict(X_test)
+
+    mape = mean_absolute_percentage_error(y_test, preds) * 100
+    st.metric("MAPE (%) on holdout", f"{mape:.2f}")
+
+    # ------------------ FORECAST + CI ------------------
+    if st.button("Run Forecast"):
+
+        ci = forecast_with_ci(model, df_feat, horizon)
+
+        st.subheader("Forecast with Confidence Bands")
+        st.dataframe(ci)
+
+        combined = pd.concat([df_feat[["demand"]].tail(168), ci["P50"]])
+
+        fig, ax = plt.subplots()
+        ax.plot(combined.index, combined.values)
+        ax.fill_between(ci.index, ci["P10"], ci["P90"], alpha=0.3)
+        ax.axvline(df_feat.index[-1], linestyle="--")
+        st.pyplot(fig)
+
+        # ------------------ SHAP ------------------
+        st.subheader("SHAP Feature Importance")
+
+        explainer = shap.TreeExplainer(model.named_steps["model"])
+        sample = df_feat[FEATURE_COLS].tail(200)
+
+        shap_values = explainer.shap_values(sample)
+
+        fig2 = plt.figure()
+        shap.summary_plot(shap_values, sample, show=False)
+        st.pyplot(fig2)
+
+else:
+    st.info("Upload CSV to begin.")
