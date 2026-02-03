@@ -212,25 +212,37 @@ if uploaded_file:
         st.success(f"Predicted Load: {pred_load:.2f}")
 
     # ---------------- FEATURE IMPORTANCE ----------------
-    st.subheader("Feature Importance")
+   st.subheader("Feature Importance")
 
-    xgb = model.named_steps["model"]
+xgb = model.named_steps["model"]
+fi = pd.Series(xgb.feature_importances_, index=FEATURE_COLS).sort_values()
 
-    fi = pd.Series(xgb.feature_importances_, index=FEATURE_COLS).sort_values()
+fig_imp, ax_imp = plt.subplots(figsize=(4, 3))
 
-    fig_imp, ax_imp = plt.subplots()
-    fi.plot(kind="barh", ax=ax_imp)
-    st.pyplot(fig_imp)
+fi.plot(kind="barh", ax=ax_imp)
+
+ax_imp.set_title("XGBoost Importance", fontsize=9)
+ax_imp.tick_params(axis='both', labelsize=7)
+
+plt.tight_layout()
+st.pyplot(fig_imp)
 
     # ---------------- PERMUTATION IMPORTANCE ----------------
-    st.subheader("Permutation Importance")
+   st.subheader("Permutation Importance")
 
-    perm = permutation_importance(model, X_test, y_test, n_repeats=5, random_state=42)
-    perm_imp = pd.Series(perm.importances_mean, index=FEATURE_COLS).sort_values()
+perm = permutation_importance(model, X_test, y_test, n_repeats=3, random_state=42)
+perm_imp = pd.Series(perm.importances_mean, index=FEATURE_COLS).sort_values()
 
-    fig_perm, ax_perm = plt.subplots()
-    perm_imp.plot(kind="barh", ax=ax_perm)
-    st.pyplot(fig_perm)
+fig_perm, ax_perm = plt.subplots(figsize=(4, 3))
+
+perm_imp.plot(kind="barh", ax=ax_perm)
+
+ax_perm.set_title("Permutation Importance", fontsize=9)
+ax_perm.tick_params(axis='both', labelsize=7)
+
+plt.tight_layout()
+st.pyplot(fig_perm)
+
 
     # ---------------- FORECAST ----------------
     if st.button("Run Forecast"):
@@ -250,5 +262,6 @@ if uploaded_file:
 
 else:
     st.info("Upload CSV to begin.")
+
 
 
