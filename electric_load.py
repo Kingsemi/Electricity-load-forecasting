@@ -199,7 +199,7 @@ if uploaded_file:
             "hour": predict_time.hour,
             "month": predict_time.month,
             "weekofyear": int(predict_time.isocalendar().week),
-            "quarter": predict_time.quarter,
+            "quarter": (predict_time.month - 1) // 3 + 1,
             "is_weekend": int(predict_time.weekday() >= 5),
             "demand_lag_24hr": lag_24,
             "demand_lag_168hr": lag_168,
@@ -250,4 +250,5 @@ if uploaded_file:
 
 else:
     st.info("Upload CSV to begin.")
+
 
